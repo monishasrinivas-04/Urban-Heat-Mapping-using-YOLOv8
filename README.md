@@ -204,7 +204,7 @@ Interactive Streamlit Dashboard
 
 ### Rooftop Segmentation
 
-<img src="assets/segmentation.png" width="430">
+<img src="assets/segmentation.jpeg" width="430">
 
 </td>
 
