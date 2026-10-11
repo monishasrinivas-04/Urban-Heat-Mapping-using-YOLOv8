@@ -2,11 +2,9 @@ streamlit==1.45.1
 ultralytics==8.4.53
 torch==2.9.1
 torchvision==0.24.1
-tensorflow
-opencv-python-headless
 numpy
 pandas
 matplotlib
 Pillow
 rasterio
-scikit-learn
+opencv-python-headless
