@@ -1,9 +1,13 @@
+
 import os
 
+# Configure writable directories before importing ML/plotting libraries
 os.environ["YOLO_CONFIG_DIR"] = "/tmp/Ultralytics"
 os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
+
+from pathlib import Path
 
 import streamlit as st
 import numpy as np
@@ -13,6 +17,7 @@ import rasterio
 import cv2
 from PIL import Image
 from ultralytics import YOLO
+
 
 # -----------------------------------
 # PAGE CONFIG
@@ -24,37 +29,78 @@ st.set_page_config(
 )
 
 st.title("Urban Heat Island Rooftop Analysis Dashboard")
+st.caption("Rooftop detection and exploratory thermal raster visualization")
+
 
 # -----------------------------------
-# LOAD YOLO MODEL
+# PROJECT FILE PATHS
 # -----------------------------------
 
-model = YOLO(
-    r"models/best.pt"
-)
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_PATH = BASE_DIR / "models" / "best.pt"
+LST_PATH = BASE_DIR / "data" / "bangalore_lst.tif"
+
 
 # -----------------------------------
-# LOAD LST TIFF FILE
+# LOAD YOLO MODEL (CACHED)
 # -----------------------------------
 
-lst_path = r"data/bangalore_lst.tif"
+@st.cache_resource
+def load_model(model_path):
+    if not Path(model_path).is_file():
+        raise FileNotFoundError(
+            f"YOLO model file not found: {model_path}"
+        )
 
-with rasterio.open(lst_path) as src:
-    lst_data = src.read(1)
+    return YOLO(str(model_path))
 
-# Remove NaN values
-lst_data = np.nan_to_num(lst_data)
 
-# Normalize thermal image
-lst_normalized = cv2.normalize(
-    lst_data,
-    None,
-    0,
-    255,
-    cv2.NORM_MINMAX
-)
+# -----------------------------------
+# LOAD LST RASTER (CACHED)
+# -----------------------------------
 
-lst_normalized = np.uint8(lst_normalized)
+@st.cache_data
+def load_lst(raster_path):
+    if not Path(raster_path).is_file():
+        raise FileNotFoundError(
+            f"LST raster file not found: {raster_path}"
+        )
+
+    with rasterio.open(raster_path) as src:
+        data = src.read(1, masked=True).filled(np.nan)
+
+    valid = np.isfinite(data)
+
+    if not np.any(valid):
+        raise ValueError("The LST raster contains no valid pixels.")
+
+    # Replace invalid pixels with the valid-pixel mean for display.
+    display_data = data.copy()
+    display_data[~valid] = np.nanmean(data)
+
+    normalized = cv2.normalize(
+        display_data,
+        None,
+        0,
+        255,
+        cv2.NORM_MINMAX
+    )
+
+    return np.uint8(normalized), data
+
+
+# -----------------------------------
+# INITIALIZE RESOURCES
+# -----------------------------------
+
+try:
+    model = load_model(str(MODEL_PATH))
+    lst_normalized, lst_data = load_lst(str(LST_PATH))
+except Exception as exc:
+    st.error("The dashboard could not initialize its model or raster.")
+    st.exception(exc)
+    st.stop()
+
 
 # -----------------------------------
 # SIDEBAR CONTROLS
@@ -64,13 +110,15 @@ st.sidebar.header("Dashboard Controls")
 
 confidence = st.sidebar.slider(
     "Confidence Threshold",
-    0.1,
-    1.0,
-    0.5
+    min_value=0.1,
+    max_value=1.0,
+    value=0.5,
+    step=0.05
 )
 
+
 # -----------------------------------
-# IMAGE UPLOAD
+# UPLOAD SATELLITE IMAGE
 # -----------------------------------
 
 uploaded_file = st.file_uploader(
@@ -79,174 +127,81 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
+    try:
+        image = Image.open(uploaded_file).convert("RGB")
+        image_np = np.array(image)
 
-    # FIXED RGB CONVERSION
-    image = Image.open(uploaded_file).convert("RGB")
+        st.subheader("Uploaded Satellite Image")
+        st.image(image, use_container_width=True)
 
-    image_np = np.array(image)
+        # -------------------------------
+        # YOLO PREDICTION
+        # -------------------------------
 
-    st.subheader("Uploaded Satellite Image")
+        with st.spinner("Detecting rooftops..."):
+            results = model.predict(
+                source=image_np,
+                conf=confidence,
+                save=False,
+                verbose=False
+            )
 
-    st.image(
-        image,
-        use_container_width=True
-    )
+        result = results[0]
 
-    # -----------------------------------
-    # YOLO PREDICTION
-    # -----------------------------------
+        # Ultralytics plot output is BGR; convert to RGB for display.
+        plotted_bgr = result.plot()
+        plotted_rgb = cv2.cvtColor(plotted_bgr, cv2.COLOR_BGR2RGB)
 
-    results = model.predict(
-        source=image_np,
-        conf=confidence,
-        save=False,
-        show_labels=False,
-        show_conf=False
-    )
+        st.subheader("Detected Rooftops")
+        st.image(plotted_rgb, use_container_width=True)
 
-    result = results[0]
+        # -------------------------------
+        # ROOFTOP DETECTION SUMMARY
+        # -------------------------------
 
-    plotted = result.plot()
-
-    st.subheader("Detected Rooftops")
-
-    st.image(
-        plotted,
-        use_container_width=True
-    )
-
-    # -----------------------------------
-    # TEMPERATURE ANALYSIS
-    # -----------------------------------
-
-    temperatures = []
-
-    total_roofs = 0
-
-    if result.boxes is not None:
-
-        boxes = result.boxes.xyxy.cpu().numpy()
+        boxes = (
+            result.boxes.xyxy.cpu().numpy()
+            if result.boxes is not None
+            else np.empty((0, 4))
+        )
 
         total_roofs = len(boxes)
 
-        for box in boxes:
+        col1, col2 = st.columns(2)
+        col1.metric("Detected Rooftops", total_roofs)
+        col2.metric("Confidence Threshold", f"{confidence:.2f}")
 
-            x1, y1, x2, y2 = map(int, box)
+        st.info(
+            "Thermal comparison is disabled here because the uploaded "
+            "image has not been geospatially registered to the Bangalore "
+            "LST raster. Pixel coordinates from the two images cannot "
+            "safely be assumed to represent the same locations."
+        )
 
-            # Prevent overflow
-            x1 = max(0, x1)
-            y1 = max(0, y1)
+    except Exception as exc:
+        st.error("Rooftop detection failed.")
+        st.exception(exc)
 
-            x2 = min(lst_normalized.shape[1], x2)
-            y2 = min(lst_normalized.shape[0], y2)
-
-            roi = lst_normalized[y1:y2, x1:x2]
-
-            if roi.size > 0:
-
-                temp = np.mean(roi)
-
-                temperatures.append(temp)
-
-    # -----------------------------------
-    # DASHBOARD METRICS
-    # -----------------------------------
-
-    avg_temp = np.mean(temperatures) if temperatures else 0
-
-    hottest_temp = np.max(temperatures) if temperatures else 0
-
-    coolest_temp = np.min(temperatures) if temperatures else 0
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric(
-        "Total Rooftops",
-        total_roofs
-    )
-
-    col2.metric(
-        "Average Roof Temperature",
-        f"{avg_temp:.2f}"
-    )
-
-    col3.metric(
-        "Hottest Roof",
-        f"{hottest_temp:.2f}"
-    )
-
-    col4.metric(
-        "Coolest Roof",
-        f"{coolest_temp:.2f}"
-    )
-
-    # -----------------------------------
-    # TEMPERATURE HISTOGRAM
-    # -----------------------------------
-
-    st.subheader("Roof Temperature Distribution")
-
-    fig1, ax1 = plt.subplots(figsize=(8, 4))
-
-    ax1.hist(
-        temperatures,
-        bins=10
-    )
-
-    ax1.set_xlabel("Temperature")
-
-    ax1.set_ylabel("Number of Roofs")
-
-    st.pyplot(fig1)
-
-    # -----------------------------------
-    # PIE CHART
-    # -----------------------------------
-
-    st.subheader("Roof Heat Categories")
-
-    hot = len([t for t in temperatures if t > 180])
-
-    medium = len([t for t in temperatures if 120 <= t <= 180])
-
-    cool = len([t for t in temperatures if t < 120])
-
-    fig2, ax2 = plt.subplots()
-
-    ax2.pie(
-        [hot, medium, cool],
-        labels=["Hot", "Medium", "Cool"],
-        autopct="%1.1f%%"
-    )
-
-    st.pyplot(fig2)
-
-    # -----------------------------------
-    # DATA TABLE
-    # -----------------------------------
-
-    st.subheader("Roof Temperature Table")
-
-    df = pd.DataFrame({
-        "Roof ID": list(range(1, len(temperatures) + 1)),
-        "Temperature": temperatures
-    })
-
-    st.dataframe(df)
 
 # -----------------------------------
-# LST HEATMAP
+# LST RASTER HEATMAP
 # -----------------------------------
 
-st.subheader("Land Surface Temperature Heatmap")
+st.subheader("Bangalore Land Surface Temperature Raster")
 
-fig3, ax3 = plt.subplots(figsize=(10, 6))
+fig, ax = plt.subplots(figsize=(10, 6))
 
-heatmap = ax3.imshow(
-    lst_normalized,
-    cmap="hot"
+heatmap = ax.imshow(lst_normalized, cmap="hot")
+ax.set_xlabel("Raster column (pixel)")
+ax.set_ylabel("Raster row (pixel)")
+ax.set_title("Normalized raster visualization")
+
+fig.colorbar(heatmap, ax=ax, label="Relative display intensity (0–255)")
+st.pyplot(fig)
+plt.close(fig)
+
+st.caption(
+    "The heatmap uses normalized raster intensities for visualization. "
+    "These values are not Celsius temperatures. The raster's units and "
+    "calibration must be verified before reporting actual temperatures."
 )
-
-plt.colorbar(heatmap)
-
-st.pyplot(fig3)
