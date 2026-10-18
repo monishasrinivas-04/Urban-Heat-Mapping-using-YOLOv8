@@ -1,17 +1,18 @@
 import os
-os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
+
 os.environ["YOLO_CONFIG_DIR"] = "/tmp/Ultralytics"
 os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
 import streamlit as st
-from ultralytics import YOLO
-from PIL import Image
 import numpy as np
-import matplotlib.pyplot as plt
 import pandas as pd
+import matplotlib.pyplot as plt
 import rasterio
 import cv2
+from PIL import Image
+from ultralytics import YOLO
 
 # -----------------------------------
 # PAGE CONFIG
